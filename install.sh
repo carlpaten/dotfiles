@@ -18,8 +18,7 @@ link() {
 
 link .bashrc
 link .zshrc
-for f in "$DOTFILES"/.shell.d/*; do
-    link ".shell.d/$(basename "$f")"
-done
+link .shell.d
+link .tmux.conf
 
 echo "done — restart your shell or: source ~/.bashrc"
