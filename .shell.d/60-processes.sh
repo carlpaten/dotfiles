@@ -1,5 +1,17 @@
-# Alert alias for long running commands (e.g. sleep 10; alert)
-alias alert='notify-send --urgency=low -i "$([ $? = 0 ] && echo terminal || echo error)" "$(history|tail -n1|sed -e '\''s/^\s*[0-9]\+\s*//;s/[;&|]\s*alert$//'\'')"'
+# Alert for long running commands (e.g. sleep 10; alert)
+# With argument:  true; alert hey   → title from history, body: hey
+# Without:        sleep 10; alert   → title from history, body: directory
+alert() {
+    local rc=$?
+    local icon=$( [ $rc = 0 ] && echo terminal || echo error )
+    local cmd
+    cmd=$(history 1 | sed -e 's/^\s*[0-9]\+\s*//;s/[;&|]\+\s*alert\(.*\)\?$//')
+    if [[ $# -gt 0 ]]; then
+        notify-send --urgency=low -i "$icon" "${cmd:-Command completed}" "$*"
+    else
+        notify-send --urgency=low -i "$icon" "${cmd:-Command completed}" "$PWD"
+    fi
+}
 
 # Show what process is using a port
 case "$OSTYPE" in

@@ -1,0 +1,106 @@
+#!/usr/bin/env bash
+# WSL shim for notify-send — forwards notifications to Windows toast notifications
+# via PowerShell and WinRT. Supports the subset of options used by the bash alert alias.
+
+SUMMARY=""
+BODY=""
+URGENCY="normal"
+ICON=""
+HAS_SUMMARY=false
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -u|--urgency|--urgency=*)
+            if [[ "$1" == *=* ]]; then
+                URGENCY="${1#*=}"
+            else
+                shift
+                URGENCY="$1"
+            fi
+            ;;
+        -i|--icon|--icon=*)
+            if [[ "$1" == *=* ]]; then
+                ICON="${1#*=}"
+            else
+                shift
+                ICON="$1"
+            fi
+            ;;
+        -t|--expire-time|--expire-time=*)
+            # accept but ignore
+            if [[ "$1" != *=* ]]; then shift; fi
+            ;;
+        -a|--app-name|--app-name=*)
+            if [[ "$1" != *=* ]]; then shift; fi
+            ;;
+        -c|--category|--category=*)
+            if [[ "$1" != *=* ]]; then shift; fi
+            ;;
+        -h|--hint|--hint=*)
+            if [[ "$1" != *=* ]]; then shift; fi
+            ;;
+        --help|--version)
+            /usr/bin/notify-send "$1"
+            exit $?
+            ;;
+        -*)
+            ;; # ignore unknown flags
+        *)
+            if ! $HAS_SUMMARY; then
+                SUMMARY="$1"
+                HAS_SUMMARY=true
+            else
+                BODY="$1"
+            fi
+            ;;
+    esac
+    shift
+done
+
+if ! $HAS_SUMMARY; then
+    echo "Usage: notify-send [OPTIONS] SUMMARY [BODY]" >&2
+    exit 1
+fi
+
+# Default empty summary to "Command completed"
+[[ -z "$SUMMARY" ]] && SUMMARY="Command completed"
+
+# Build title: status icon + command summary
+if [[ "$ICON" == "error" || "$URGENCY" == "critical" ]]; then
+    HEADER="✗ $SUMMARY"
+    SOUND="Notification.Default"
+elif [[ "$ICON" == "terminal" ]]; then
+    HEADER="✓ $SUMMARY"
+    SOUND="Notification.Reminder"
+else
+    HEADER="$SUMMARY"
+    SOUND="Notification.Reminder"
+fi
+
+# Escape single quotes for PowerShell
+ps_header="${HEADER//\'/\'\'}"
+ps_body="${BODY//\'/\'\'}"
+
+powershell.exe -NoProfile -NonInteractive -Command "
+[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null
+[Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom, ContentType = WindowsRuntime] | Out-Null
+
+\$template = @'
+<toast duration=\"short\">
+  <audio src=\"ms-winsoundevent:$SOUND\"/>
+  <visual>
+    <binding template=\"ToastGeneric\">
+      <text>$ps_header</text>
+      <text>$ps_body</text>
+    </binding>
+  </visual>
+</toast>
+'@
+
+\$xml = New-Object Windows.Data.Xml.Dom.XmlDocument
+\$xml.LoadXml(\$template)
+\$toast = [Windows.UI.Notifications.ToastNotification]::new(\$xml)
+[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('Microsoft.WindowsTerminal_8wekyb3d8bbwe!App').Show(\$toast)
+" 2>/dev/null
+
+exit 0

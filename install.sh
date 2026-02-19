@@ -20,6 +20,7 @@ link .bashrc
 link .zshrc
 link .shell.d
 link .tmux.conf
+link .local/bin/notify-send
 
 # SSH authorized keys
 keys=("$DOTFILES"/ssh-keys/*.pub)
