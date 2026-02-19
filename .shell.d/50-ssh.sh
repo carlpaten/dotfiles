@@ -1,4 +1,4 @@
-# SSH agent configuration — use a fixed socket so all tmux panes share one agent
+# SSH agent configuration — use a fixed socket so all shells share the same agent
 export SSH_AUTH_SOCK="$HOME/.ssh/agent.sock"
 
 if ! ssh-add -l &>/dev/null; then
