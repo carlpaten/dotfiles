@@ -1,0 +1,19 @@
+{
+  "github": {
+    "type": "http",
+    "url": "https://api.githubcopilot.com/mcp/"
+  },
+  "linear": {
+    "command": "pnpx",
+    "args": [
+      "mcp-remote",
+      "https://mcp.linear.app/mcp"
+    ]
+  },
+  "playwright": {
+    "command": "npx",
+    "args": [
+      "@playwright/mcp@latest"
+    ]
+  }
+}

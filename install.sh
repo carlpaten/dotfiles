@@ -52,5 +52,38 @@ if [ ${#keys[@]} -gt 0 ]; then
     fi
 fi
 
+# Claude MCP servers
+if [ -f "$DOTFILES/mcps.json" ] && command -v jq &>/dev/null; then
+    target="$HOME/.claude.json"
+    if [ -f "$target" ]; then
+        jq --slurpfile mcps "$DOTFILES/mcps.json" '.mcpServers = $mcps[0]' "$target" > "$target.tmp" \
+            && mv "$target.tmp" "$target"
+    else
+        jq -n --slurpfile mcps "$DOTFILES/mcps.json" '{mcpServers: $mcps[0]}' > "$target"
+    fi
+    echo "merged mcps.json -> ~/.claude.json"
+fi
+
+# Pre-commit hook for Claude MCP extraction
+hook="$DOTFILES/.git/hooks/pre-commit"
+cat > "$hook" << 'HOOK'
+#!/usr/bin/env bash
+set -euo pipefail
+DOTFILES="$(cd "$(dirname "$0")/../.." && pwd)"
+target="$HOME/.claude.json"
+if [ -f "$target" ] && command -v jq &>/dev/null; then
+    jq '.mcpServers // {}' "$target" > "$DOTFILES/mcps.json.tmp"
+    if ! diff -q "$DOTFILES/mcps.json.tmp" "$DOTFILES/mcps.json" &>/dev/null; then
+        mv "$DOTFILES/mcps.json.tmp" "$DOTFILES/mcps.json"
+        git add "$DOTFILES/mcps.json"
+        echo "updated mcps.json from ~/.claude.json"
+    else
+        rm "$DOTFILES/mcps.json.tmp"
+    fi
+fi
+HOOK
+chmod +x "$hook"
+echo "installed pre-commit hook"
+
 echo ""
 echo "done — restart your shell or: source ~/.bashrc"
