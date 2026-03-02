@@ -1,8 +1,4 @@
 {
-  "github": {
-    "type": "http",
-    "url": "https://api.githubcopilot.com/mcp/"
-  },
   "linear": {
     "command": "pnpx",
     "args": [
