@@ -18,11 +18,12 @@ formulae=(
     bitwarden-cli
     fnm
     tmux
-    spotify
+    shellcheck
     gh
 )
 
 casks=(
+    spotify
     cursor
     google-chrome
     rectangle

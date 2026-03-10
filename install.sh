@@ -20,6 +20,7 @@ if command -v fnm &>/dev/null; then
 fi
 
 "$DOTFILES/scripts/node.sh"
+"$DOTFILES/scripts/playwright.sh"
 "$DOTFILES/scripts/pnpm.sh"
 "$DOTFILES/scripts/codex.sh"
 "$DOTFILES/scripts/claude.sh"
@@ -99,8 +100,9 @@ if [ ${#keys[@]} -gt 0 ]; then
     fi
 fi
 
-# Claude MCP servers and statusline
+# MCP servers, auth, and statusline
 "$DOTFILES/install-mcps.sh"
+"$DOTFILES/install-mcp-auth.sh"
 "$DOTFILES/install-statusline.sh"
 "$DOTFILES/install-skills.sh"
 

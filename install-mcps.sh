@@ -60,29 +60,52 @@ merge_claude_mcp() {
     echo "merged mcps.json -> ~/.claude.json"
 }
 
+render_codex_mcp_sections() {
+    local name
+    local command_json
+    local args_json
+    local url_json
+
+    while IFS= read -r name; do
+        if jq -e --arg name "$name" '.[$name].type == "http" and (.[$name].url | type == "string")' "$MCP_FILE" >/dev/null; then
+            url_json="$(jq -r --arg name "$name" '.[$name].url | @json' "$MCP_FILE")"
+            printf '[mcp_servers.%s]\nurl = %s\n\n' "$name" "$url_json"
+        elif jq -e --arg name "$name" '.[$name].command | type == "string"' "$MCP_FILE" >/dev/null; then
+            command_json="$(jq -r --arg name "$name" '.[$name].command | @json' "$MCP_FILE")"
+            args_json="$(jq -c --arg name "$name" '.[$name].args // []' "$MCP_FILE")"
+            printf '[mcp_servers.%s]\ncommand = %s\nargs = %s\n\n' "$name" "$command_json" "$args_json"
+        fi
+    done < <(jq -r 'keys[]' "$MCP_FILE")
+}
+
 install_codex_mcp() {
-    if ! command -v codex &>/dev/null; then
-        echo "codex not found, skipping Codex MCP install"
-        return
+    mkdir -p "$(dirname "$CODEX_CONFIG_FILE")"
+
+    if [ -f "$CODEX_CONFIG_FILE" ]; then
+        awk '
+            BEGIN { in_mcp_section = 0 }
+            /^\[mcp_servers\./ {
+                in_mcp_section = 1
+                next
+            }
+            /^\[/ {
+                in_mcp_section = 0
+            }
+            !in_mcp_section { print }
+        ' "$CODEX_CONFIG_FILE" > "$CODEX_CONFIG_FILE.tmp"
+    else
+        : > "$CODEX_CONFIG_FILE.tmp"
     fi
 
-    mapfile -t names < <(jq -r 'keys[]' "$MCP_FILE")
+    if [ -s "$CODEX_CONFIG_FILE.tmp" ]; then
+        printf '\n' >> "$CODEX_CONFIG_FILE.tmp"
+    fi
 
-    for name in "${names[@]}"; do
-        if jq -e --arg name "$name" '.[$name].type == "http" and (.[$name].url | type == "string")' "$MCP_FILE" >/dev/null; then
-            url="$(jq -r --arg name "$name" '.[$name].url' "$MCP_FILE")"
-            codex mcp add "$name" --url "$url" >/dev/null
-            echo "configured Codex MCP: $name (remote)"
-        elif jq -e --arg name "$name" '.[$name].command | type == "string"' "$MCP_FILE" >/dev/null; then
-            command="$(jq -r --arg name "$name" '.[$name].command' "$MCP_FILE")"
-            mapfile -t args < <(jq -r --arg name "$name" '.[$name].args[]? // empty' "$MCP_FILE")
-            codex mcp add "$name" -- "$command" "${args[@]}" >/dev/null
-            echo "configured Codex MCP: $name (local)"
-        fi
-    done
+    render_codex_mcp_sections >> "$CODEX_CONFIG_FILE.tmp"
+    mv "$CODEX_CONFIG_FILE.tmp" "$CODEX_CONFIG_FILE"
 
     patch_codex_playwright_timeout
-    echo "configured Codex MCP timeout: playwright (90.0 seconds)"
+    echo "merged mcps.json -> ~/.codex/config.toml"
 }
 
 merge_opencode_mcp() {
