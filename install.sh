@@ -51,6 +51,8 @@ link .local/bin/claude_usage
 link .local/bin/git-prune-merged
 link .local/bin/playwright-mcp-authenticated
 link .local/bin/pi-playwright-signin-state-from-bitwarden
+link .local/bin/start-outhouse-worktree
+link .local/bin/start-noshun-worktree
 link .cursor/mcp.json
 link AGENTS.md
 

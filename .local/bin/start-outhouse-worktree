@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ $# -ne 1 ]]; then
+    echo "Usage: $(basename "$0") <linear-issue-key>" >&2
+    exit 1
+fi
+
+ISSUE_KEY="$1"
+MAIN_WORKTREE_PATH="$HOME/macrosoft"
+OPEN_WORKTREE_SCRIPT="$HOME/.scripts/open-desktop-worktree.sh"
+REFERENCE_URL="https://outlook.office.com"
+
+slugify() {
+    local value="$1"
+    printf '%s' "$value" \
+        | tr '[:upper:]' '[:lower:]' \
+        | sed -E 's/[^a-z0-9._-]+/-/g; s/^-+//; s/-+$//; s/-{2,}/-/g'
+}
+
+wait_for_server() {
+    local port="$1"
+    local timeout_seconds="${2:-120}"
+    local elapsed=0
+
+    while (( elapsed < timeout_seconds )); do
+        if curl -s --max-time 2 "http://localhost:${port}/api/v1/me/mailFolders" >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep 1
+        elapsed=$((elapsed + 1))
+    done
+
+    return 1
+}
+
+OPEN_OUTPUT="$($OPEN_WORKTREE_SCRIPT --reference-url "$REFERENCE_URL" "$MAIN_WORKTREE_PATH" "$ISSUE_KEY")"
+printf '%s\n' "$OPEN_OUTPUT"
+
+DEV_PORT="$(printf '%s\n' "$OPEN_OUTPUT" | awk -F': ' '/Assigned dev port:/ {print $2; exit}')"
+if [[ -z "$DEV_PORT" ]]; then
+    echo "Warning: Could not determine assigned dev port. Skipping db seed." >&2
+    exit 0
+fi
+
+REPO_NAME="$(basename "$MAIN_WORKTREE_PATH")"
+PARENT_DIR="$(dirname "$MAIN_WORKTREE_PATH")"
+ISSUE_SLUG="$(slugify "$ISSUE_KEY")"
+WORKTREE_PATH="${PARENT_DIR}/${REPO_NAME}-${ISSUE_SLUG}"
+
+if [[ ! -d "$WORKTREE_PATH" ]]; then
+    echo "Warning: Worktree path not found at $WORKTREE_PATH. Skipping db seed." >&2
+    exit 0
+fi
+
+if ! wait_for_server "$DEV_PORT" 120; then
+    echo "Warning: Dev server on port $DEV_PORT did not become reachable in time. Skipping db seed." >&2
+    exit 0
+fi
+
+echo "Seeding database for $WORKTREE_PATH via http://localhost:$DEV_PORT ..."
+(
+    cd "$WORKTREE_PATH"
+    OUTHOUSE_URL="http://localhost:${DEV_PORT}" pnpm db:seed -- -pick mail
+)

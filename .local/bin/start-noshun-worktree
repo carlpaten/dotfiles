@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ $# -ne 1 ]]; then
+    echo "Usage: $(basename "$0") <linear-issue-key>" >&2
+    exit 1
+fi
+
+exec "$HOME/.scripts/open-desktop-worktree.sh" --reference-url "https://notion.so" "$HOME/NoShun" "$1"
