@@ -18,6 +18,8 @@ formulae=(
     bitwarden-cli
     fnm
     tmux
+    spotify
+    gh
 )
 
 casks=(
