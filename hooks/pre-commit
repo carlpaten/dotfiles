@@ -5,7 +5,25 @@ DOTFILES="$(cd "$(dirname "$0")/../.." && pwd)"
 # Extract MCP servers from ~/.claude.json
 target="$HOME/.claude.json"
 if [ -f "$target" ] && command -v jq &>/dev/null; then
-    jq '.mcpServers // {}' "$target" > "$DOTFILES/mcps.json.tmp"
+    jq '
+        (.mcpServers // {})
+        | with_entries(
+            if (
+                (.value.command // "") == "pnpx"
+                and (.value.args | type == "array")
+                and (.value.args | length) == 2
+                and .value.args[0] == "mcp-remote"
+                and (.value.args[1] | type == "string")
+            ) then
+                .value = {
+                    type: "http",
+                    url: .value.args[1]
+                }
+            else
+                .
+            end
+        )
+    ' "$target" > "$DOTFILES/mcps.json.tmp"
     if ! diff -q "$DOTFILES/mcps.json.tmp" "$DOTFILES/mcps.json" &>/dev/null; then
         mv "$DOTFILES/mcps.json.tmp" "$DOTFILES/mcps.json"
         git add "$DOTFILES/mcps.json"

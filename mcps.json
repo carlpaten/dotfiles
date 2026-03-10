@@ -1,10 +1,7 @@
 {
   "linear": {
-    "command": "pnpx",
-    "args": [
-      "mcp-remote",
-      "https://mcp.linear.app/mcp"
-    ]
+    "type": "http",
+    "url": "https://mcp.linear.app/mcp"
   },
   "playwright": {
     "command": "npx",
