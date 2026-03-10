@@ -11,11 +11,168 @@ MAIN_WORKTREE_PATH="$HOME/macrosoft"
 OPEN_WORKTREE_SCRIPT="$HOME/.scripts/open-desktop-worktree.sh"
 REFERENCE_URL="https://outlook.office.com"
 
+die() {
+    echo "$1" >&2
+    exit 1
+}
+
+require_command() {
+    local cmd="$1"
+    local message="${2:-$cmd not found in PATH.}"
+    command -v "$cmd" >/dev/null 2>&1 || die "$message"
+}
+
 slugify() {
     local value="$1"
     printf '%s' "$value" \
         | tr '[:upper:]' '[:lower:]' \
         | sed -E 's/[^a-z0-9._-]+/-/g; s/^-+//; s/-+$//; s/-{2,}/-/g'
+}
+
+find_free_port() {
+    local port="${1:-3002}"
+    while [[ $port -le 65535 ]]; do
+        if command -v ss >/dev/null 2>&1; then
+            if ! ss -Htan "( sport = :$port )" 2>/dev/null | grep -q . \
+                && ! ss -Huan "( sport = :$port )" 2>/dev/null | grep -q .; then
+                printf '%s\n' "$port"
+                return 0
+            fi
+        elif command -v lsof >/dev/null 2>&1; then
+            if ! lsof -nP -iTCP:"$port" -sTCP:LISTEN >/dev/null 2>&1; then
+                printf '%s\n' "$port"
+                return 0
+            fi
+        elif command -v netstat >/dev/null 2>&1; then
+            if ! netstat -an 2>/dev/null | awk '{print $4}' | grep -Eq "[:.]$port$"; then
+                printf '%s\n' "$port"
+                return 0
+            fi
+        else
+            printf '%s\n' "$port"
+            return 0
+        fi
+        port=$((port + 1))
+    done
+    return 1
+}
+
+next_available_branch() {
+    local repo_root="$1"
+    local base="$2"
+    local branch="$base"
+    local counter=2
+    while git -C "$repo_root" show-ref --verify --quiet "refs/heads/$branch"; do
+        branch="${base}-${counter}"
+        counter=$((counter + 1))
+    done
+    printf '%s\n' "$branch"
+}
+
+ensure_worktree() {
+    local repo_root="$1"
+    local worktree_path="$2"
+    local branch_to_create="$3"
+    local start_point="$4"
+
+    if [[ -e "$worktree_path" ]]; then
+        if git -C "$worktree_path" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+            local existing_branch
+            existing_branch="$(git -C "$worktree_path" rev-parse --abbrev-ref HEAD)"
+            printf 'reused|%s\n' "$existing_branch"
+            return 0
+        fi
+        die "Target path exists and is not a git worktree: $worktree_path"
+    fi
+
+    git -C "$repo_root" worktree add -b "$branch_to_create" "$worktree_path" "$start_point" >/dev/null
+    printf 'created|%s\n' "$branch_to_create"
+}
+
+ensure_tmux_session_macos() {
+    local tmux_session="$1"
+    local worktree_path="$2"
+    local dev_port="$3"
+    local dev_command
+    local top_pane
+    local bottom_pane
+
+    dev_command="cd \"$worktree_path\" && pnpm install && (printf 'a\\n\\n' | pnpm approve-builds || true) && PORT=\"$dev_port\" pnpm dev -- --port \"$dev_port\""
+
+    if tmux has-session -t "$tmux_session" 2>/dev/null; then
+        local pane_count
+        pane_count="$(tmux list-panes -t "$tmux_session" -F '#{pane_id}' | wc -l | tr -d ' ')"
+        top_pane="$(tmux list-panes -t "$tmux_session" -F '#{pane_id}' | head -n1)"
+        if [[ "${pane_count:-0}" -lt 2 && -n "$top_pane" ]]; then
+            bottom_pane="$(tmux split-window -v -P -F '#{pane_id}' -t "$top_pane" -c "$worktree_path")"
+            tmux send-keys -t "$bottom_pane" "$dev_command" C-m
+            tmux select-layout -t "$tmux_session" even-vertical >/dev/null 2>&1 || true
+        fi
+        return 0
+    fi
+
+    tmux new-session -d -s "$tmux_session" -c "$worktree_path"
+    top_pane="$(tmux list-panes -t "$tmux_session" -F '#{pane_id}' | head -n1)"
+    [[ -n "$top_pane" ]] || die "Failed to determine tmux pane for session $tmux_session."
+    bottom_pane="$(tmux split-window -v -P -F '#{pane_id}' -t "$top_pane" -c "$worktree_path")"
+    tmux send-keys -t "$bottom_pane" "$dev_command" C-m
+    tmux select-layout -t "$tmux_session" even-vertical >/dev/null 2>&1 || true
+}
+
+open_worktree_macos() {
+    local main_worktree_path="$1"
+    local issue_key="$2"
+    local reference_url="$3"
+
+    require_command git "git not found in PATH."
+    require_command tmux "tmux not found in PATH."
+    require_command pnpm "pnpm not found in PATH."
+
+    local main_repo_root
+    main_repo_root="$(git -C "$main_worktree_path" rev-parse --show-toplevel 2>/dev/null || true)"
+    [[ -n "$main_repo_root" ]] || die "Path is not inside a git worktree: $main_worktree_path"
+
+    local repo_name parent_dir issue_slug dev_port worktree_name worktree_path
+    repo_name="$(basename "$main_repo_root")"
+    parent_dir="$(dirname "$main_repo_root")"
+    issue_slug="$(slugify "$issue_key")"
+    [[ -n "$issue_slug" ]] || die "Issue key produced an empty slug: $issue_key"
+    dev_port="$(find_free_port 3002 || true)"
+    [[ -n "$dev_port" ]] || die "Unable to determine a free development port."
+
+    worktree_name="${repo_name}-${issue_slug}"
+    worktree_path="${parent_dir}/${worktree_name}"
+
+    git -C "$main_repo_root" fetch --quiet origin dev || die "Failed to fetch origin/dev from $main_repo_root"
+
+    local branch_base branch_to_create worktree_result branch_name reused_worktree tmux_session
+    branch_base="feature/${repo_name}-${issue_slug}"
+    branch_to_create="$(next_available_branch "$main_repo_root" "$branch_base")"
+    worktree_result="$(ensure_worktree "$main_repo_root" "$worktree_path" "$branch_to_create" "origin/dev")"
+    branch_name="${worktree_result#*|}"
+    reused_worktree="false"
+    if [[ "${worktree_result%%|*}" == "reused" ]]; then
+        reused_worktree="true"
+    fi
+
+    tmux_session="desk-${repo_name}-${issue_slug}"
+    ensure_tmux_session_macos "$tmux_session" "$worktree_path" "$dev_port"
+
+    if command -v open >/dev/null 2>&1; then
+        open "http://localhost:${dev_port}" >/dev/null 2>&1 || true
+        open "https://linear.app/issue/${issue_key}" >/dev/null 2>&1 || true
+        if [[ -n "$reference_url" ]]; then
+            open "$reference_url" >/dev/null 2>&1 || true
+        fi
+    fi
+
+    echo "Created worktree: $worktree_path"
+    echo "Created branch: $branch_name"
+    if [[ "$reused_worktree" == "true" ]]; then
+        echo "Reused existing worktree directory."
+    fi
+    echo "Opened tmux session: $tmux_session"
+    echo "Assigned dev port: $dev_port"
 }
 
 wait_for_server() {
@@ -34,7 +191,11 @@ wait_for_server() {
     return 1
 }
 
-OPEN_OUTPUT="$($OPEN_WORKTREE_SCRIPT --reference-url "$REFERENCE_URL" "$MAIN_WORKTREE_PATH" "$ISSUE_KEY")"
+if [[ "$(uname -s)" == "Darwin" ]]; then
+    OPEN_OUTPUT="$(open_worktree_macos "$MAIN_WORKTREE_PATH" "$ISSUE_KEY" "$REFERENCE_URL")"
+else
+    OPEN_OUTPUT="$($OPEN_WORKTREE_SCRIPT --reference-url "$REFERENCE_URL" "$MAIN_WORKTREE_PATH" "$ISSUE_KEY")"
+fi
 printf '%s\n' "$OPEN_OUTPUT"
 
 DEV_PORT="$(printf '%s\n' "$OPEN_OUTPUT" | awk -F': ' '/Assigned dev port:/ {print $2; exit}')"
