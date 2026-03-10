@@ -1,0 +1,290 @@
+#!/usr/bin/env python3
+"""
+Claude Code tmux status segment.
+
+Outputs a tmux-formatted string showing usage percentages and reset times
+from `claude /usage`.
+
+Add to ~/.tmux.conf:
+  set -g status-right "#(claude_usage) | %H:%M"
+  set -g status-interval 30
+"""
+
+import json
+import os
+import pty
+import re
+import select
+import signal
+import struct
+import sys
+import time
+from pathlib import Path
+
+# ── CONFIG ────────────────────────────────────────────────────────────────────
+CACHE_FILE = Path("/tmp/claude_usage_cache.json")
+CACHE_TTL = 120  # seconds — /usage is expensive to spawn
+CLAUDE_BIN = os.environ.get("CLAUDE_BIN", "claude")
+
+C_SESSION = "colour39"   # blue
+C_WEEKLY = "colour208"   # orange
+C_DIM = "colour240"      # separator
+C_WARN = "colour196"     # red — when ≥80%
+C_CRIT = "colour196"     # red bold — when ≥90%
+C_RESET = "default"
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def fetch_usage_raw():
+    """Spawn `claude --dangerously-skip-permissions`, type /usage, capture TUI output."""
+    import fcntl
+    import termios
+
+    master, slave = pty.openpty()
+    winsize = struct.pack("HHHH", 50, 120, 0, 0)
+    fcntl.ioctl(slave, termios.TIOCSWINSZ, winsize)
+
+    pid = os.fork()
+    if pid == 0:
+        # Child
+        os.close(master)
+        os.setsid()
+        fcntl.ioctl(slave, termios.TIOCSCTTY, 0)
+        os.dup2(slave, 0)
+        os.dup2(slave, 1)
+        os.dup2(slave, 2)
+        if slave > 2:
+            os.close(slave)
+        env = dict(os.environ)
+        env.pop("CLAUDECODE", None)
+        os.execvpe(CLAUDE_BIN, [CLAUDE_BIN, "--dangerously-skip-permissions"], env)
+    else:
+        # Parent
+        os.close(slave)
+        output = bytearray()
+
+        def drain(t=0.3):
+            while True:
+                r, _, _ = select.select([master], [], [], t)
+                if not r:
+                    break
+                try:
+                    c = os.read(master, 16384)
+                    if not c:
+                        return
+                    output.extend(c)
+                except OSError:
+                    return
+
+        # Wait for startup
+        start = time.time()
+        while time.time() - start < 12:
+            drain(1.0)
+            if b"bypass" in output or b"Try" in output:
+                break
+        time.sleep(2)
+        drain()
+
+        # Type /usage + Tab (accept autocomplete) + Enter
+        for ch in "/usage":
+            os.write(master, ch.encode())
+            time.sleep(0.1)
+        time.sleep(0.5)
+        os.write(master, b"\t")
+        time.sleep(0.5)
+        drain()
+        os.write(master, b"\r")
+
+        # Wait for usage panel to fully render.
+        # Look for "Extra" (last section) + "Resets" as signal that all data is present.
+        deadline = time.time() + 15
+        while time.time() < deadline:
+            drain(1.0)
+            raw = bytes(output)
+            if b"Extra" in raw and raw.count(b"Resets") >= 2:
+                time.sleep(3)
+                drain()
+                break
+
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except OSError:
+            pass
+        try:
+            os.waitpid(pid, 0)
+        except ChildProcessError:
+            pass
+        try:
+            os.close(master)
+        except OSError:
+            pass
+
+        text = bytes(output).decode("utf-8", errors="replace")
+        # Strip ANSI
+        clean = re.sub(r"\x1b\[[0-9;?]*[a-zA-Z]", "", text)
+        clean = re.sub(r"\x1b\][^\x07\x1b]*[\x07]", "", clean)
+        clean = re.sub(r"\x1b[()][AB012]", "", clean)
+        clean = re.sub(r"\x1b[>=<]", "", clean)
+        clean = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", "", clean)
+        return clean
+
+
+def _match_reset(line):
+    """Extract reset time from a TUI line like 'Reses4pm (America/New_York)'."""
+    m = re.search(r"Res[a-z]*(.*?\(.*?\))", line)
+    if m:
+        raw = m.group(1).strip()
+        return re.sub(r"^[,·\s]+", "", raw)
+    return None
+
+
+def parse_usage(raw):
+    """Parse the /usage TUI output into structured data.
+
+    The TUI renders as separate lines, with words sometimes missing spaces:
+      L129: Current session
+      L130: ███████████▌                                      23%used
+      L131: Reses4pm (America/New_York)
+      ...
+      L135: Currentweek(allmodels)
+      L137: ███                                               6%used
+      L139: ResetsFeb23,2pm(America/New_York)
+      ...
+      L151: Extrausage
+      L153: ██████████████████████████████████████▋           77%used
+      L155: $15.46/$20.00spent·ResetsMar1(America/New_York)
+    """
+    data = {}
+    lines = raw.split("\n")
+
+    # Find section headers and extract data from surrounding lines
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+
+        # ── Current session ───────────────────────────────────────
+        if re.match(r"Current\s*session", stripped):
+            # Look ahead for NN%used and Res...
+            for j in range(i + 1, min(i + 5, len(lines))):
+                m = re.search(r"(\d+)%\s*used", lines[j])
+                if m:
+                    data["session_pct"] = int(m.group(1))
+                m = _match_reset(lines[j])
+                if m:
+                    data["session_resets"] = m
+
+        # ── Current week (all models) ────────────────────────────
+        if re.search(r"Current\s*week\s*\(?all", stripped):
+            for j in range(i + 1, min(i + 5, len(lines))):
+                m = re.search(r"(\d+)%\s*used", lines[j])
+                if m:
+                    data["week_all_pct"] = int(m.group(1))
+                m = _match_reset(lines[j])
+                if m:
+                    data["week_all_resets"] = m
+
+        # ── Current week (Sonnet only) ───────────────────────────
+        if re.search(r"Current\s*week\s*\(?Sonnet", stripped):
+            for j in range(i + 1, min(i + 5, len(lines))):
+                m = re.search(r"(\d+)%\s*used", lines[j])
+                if m:
+                    data["week_sonnet_pct"] = int(m.group(1))
+                m = _match_reset(lines[j])
+                if m:
+                    data["week_sonnet_resets"] = m
+
+        # ── Extra usage ──────────────────────────────────────────
+        if re.match(r"Extra\s*usage", stripped):
+            for j in range(i + 1, min(i + 5, len(lines))):
+                m = re.search(r"(\d+)%\s*used", lines[j])
+                if m:
+                    data["extra_pct"] = int(m.group(1))
+                m = re.search(r"\$([0-9.]+)\s*/\s*\$([0-9.]+)", lines[j])
+                if m:
+                    data["extra_spent"] = float(m.group(1))
+                    data["extra_budget"] = float(m.group(2))
+                m = _match_reset(lines[j])
+                if m:
+                    data["extra_resets"] = m
+
+    return data
+
+
+def load_cache():
+    try:
+        raw = CACHE_FILE.read_text()
+        data = json.loads(raw)
+        if time.time() - data.get("cached_at", 0) < CACHE_TTL:
+            return data
+    except Exception:
+        pass
+    return None
+
+
+def save_cache(data):
+    try:
+        data["cached_at"] = time.time()
+        CACHE_FILE.write_text(json.dumps(data))
+    except Exception:
+        pass
+
+
+def colour_for(pct, base):
+    if pct >= 90:
+        return C_CRIT
+    if pct >= 80:
+        return C_WARN
+    return base
+
+
+def shorten_reset(s):
+    """Shorten reset string for tmux: 'Feb23,2pm(America/New_York)' -> 'Feb 23, 2pm'."""
+    if not s:
+        return ""
+    # Remove timezone in parens
+    s = re.sub(r"\s*\(.*?\)", "", s).strip()
+    # Add spaces after month names and before am/pm times (TUI garbles spacing)
+    s = re.sub(r"([A-Za-z])(\d)", r"\1 \2", s)
+    s = re.sub(r"(\d),(\d)", r"\1, \2", s)
+    return s
+
+
+def main():
+    data = load_cache()
+    if data is None or "session_pct" not in data:
+        raw = fetch_usage_raw()
+        if raw:
+            data = parse_usage(raw)
+            save_cache(data)
+        else:
+            data = {}
+
+    if not data or "week_all_pct" not in data:
+        print("#[fg=colour240]CC: no data#[fg=default]", end="")
+        return
+
+    # Note: session data from a spawned instance reflects a *fresh* session,
+    # not the user's active one.  Only weekly + extra usage are account-wide.
+    w_pct = data.get("week_all_pct", 0)
+    w_reset = shorten_reset(data.get("week_all_resets", ""))
+
+    wc = colour_for(w_pct, C_WEEKLY)
+
+    parts = [
+        f"#[fg={wc}]W:{w_pct}%",
+    ]
+    if w_reset:
+        parts.append(f"#[fg={C_DIM}]\u2192{w_reset}")
+
+    # Show extra usage if present
+    if "extra_pct" in data:
+        e_pct = data["extra_pct"]
+        ec = colour_for(e_pct, "colour213")  # pink
+        parts.append(f"#[fg={C_DIM}]|")
+        parts.append(f"#[fg={ec}]${data.get('extra_spent', 0):.0f}/${data.get('extra_budget', 0):.0f}")
+
+    parts.append(f"#[fg={C_RESET}]")
+    print(" ".join(parts), end="")
+
+
+if __name__ == "__main__":
+    main()

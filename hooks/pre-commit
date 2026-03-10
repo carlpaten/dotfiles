@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+set -euo pipefail
+DOTFILES="$(cd "$(dirname "$0")/../.." && pwd)"
+
+# Extract MCP servers from ~/.claude.json
+target="$HOME/.claude.json"
+if [ -f "$target" ] && command -v jq &>/dev/null; then
+    jq '.mcpServers // {}' "$target" > "$DOTFILES/mcps.json.tmp"
+    if ! diff -q "$DOTFILES/mcps.json.tmp" "$DOTFILES/mcps.json" &>/dev/null; then
+        mv "$DOTFILES/mcps.json.tmp" "$DOTFILES/mcps.json"
+        git add "$DOTFILES/mcps.json"
+        echo "updated mcps.json from ~/.claude.json"
+    else
+        rm "$DOTFILES/mcps.json.tmp"
+    fi
+fi
+
+# Extract statusLine from ~/.claude/settings.json
+settings="$HOME/.claude/settings.json"
+if [ -f "$settings" ] && command -v jq &>/dev/null; then
+    jq '.statusLine // {}' "$settings" > "$DOTFILES/claude-statusline.json.tmp"
+    if ! diff -q "$DOTFILES/claude-statusline.json.tmp" "$DOTFILES/claude-statusline.json" &>/dev/null; then
+        mv "$DOTFILES/claude-statusline.json.tmp" "$DOTFILES/claude-statusline.json"
+        git add "$DOTFILES/claude-statusline.json"
+        echo "updated claude-statusline.json from ~/.claude/settings.json"
+    else
+        rm "$DOTFILES/claude-statusline.json.tmp"
+    fi
+fi

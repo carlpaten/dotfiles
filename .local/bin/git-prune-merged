@@ -1,0 +1,155 @@
+#!/usr/bin/env bash
+# git-prune-merged — detect and remove worktrees & branches fully merged into a base branch.
+#
+# Usage:
+#   git-prune-merged [--dry-run] [--base <branch>]
+#
+# Detection methods (in order):
+#   1. git merge-base --is-ancestor (regular merges)
+#   2. gh pr list --state merged     (squash/rebase merges via GitHub)
+#
+# With --dry-run (default): prints what would be removed.
+# Without --dry-run: removes worktrees and deletes local branches.
+
+set -euo pipefail
+
+DRY_RUN=true
+BASE_BRANCH=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --dry-run)  DRY_RUN=true; shift ;;
+    --delete)   DRY_RUN=false; shift ;;
+    --base)     BASE_BRANCH="$2"; shift 2 ;;
+    -h|--help)
+      echo "Usage: git-prune-merged [--dry-run|--delete] [--base <branch>]"
+      echo ""
+      echo "  --dry-run   Show what would be removed (default)"
+      echo "  --delete    Actually remove merged worktrees and branches"
+      echo "  --base      Base branch to check against (default: autodetect)"
+      exit 0
+      ;;
+    *) echo "Unknown option: $1" >&2; exit 1 ;;
+  esac
+done
+
+# Autodetect base branch
+if [[ -z "$BASE_BRANCH" ]]; then
+  BASE_BRANCH=$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's|refs/remotes/origin/||' || true)
+  if [[ -z "$BASE_BRANCH" ]]; then
+    for candidate in main master dev; do
+      if git show-ref --verify --quiet "refs/heads/$candidate" 2>/dev/null; then
+        BASE_BRANCH="$candidate"
+        break
+      fi
+    done
+  fi
+fi
+
+if [[ -z "$BASE_BRANCH" ]]; then
+  echo "Error: could not detect base branch. Use --base <branch>." >&2
+  exit 1
+fi
+
+HAS_GH=false
+if command -v gh &>/dev/null && gh auth status &>/dev/null 2>&1; then
+  HAS_GH=true
+fi
+
+# Check if a branch is merged into base
+is_merged() {
+  local branch="$1"
+
+  # Method 1: ancestor check (regular merge)
+  if git merge-base --is-ancestor "$branch" "$BASE_BRANCH" 2>/dev/null; then
+    echo "ancestor"
+    return 0
+  fi
+
+  # Method 2: GitHub PR state (squash/rebase merge)
+  if $HAS_GH; then
+    local merged_count
+    merged_count=$(gh pr list --head "$branch" --state merged --json number --jq 'length' 2>/dev/null || echo "0")
+    if [[ "$merged_count" -gt 0 ]]; then
+      echo "squash-merged (GitHub)"
+      return 0
+    fi
+  fi
+
+  return 1
+}
+
+current_branch=$(git branch --show-current 2>/dev/null || true)
+merged_worktrees=()
+merged_branches=()
+
+echo "Base branch: $BASE_BRANCH"
+[[ "$HAS_GH" == "true" ]] || echo "Note: gh CLI not available — squash merges may not be detected"
+echo ""
+
+# Phase 1: Check worktrees
+while IFS= read -r line; do
+  wt_path=$(echo "$line" | awk '{print $1}')
+  wt_branch=$(echo "$line" | sed 's/.*\[//' | sed 's/\]//')
+
+  # Skip the main worktree
+  main_wt=$(git rev-parse --show-toplevel 2>/dev/null)
+  [[ "$wt_path" == "$main_wt" ]] && continue
+
+  reason=$(is_merged "$wt_branch" 2>/dev/null) && {
+    echo "worktree  $wt_path ($wt_branch) — $reason"
+    merged_worktrees+=("$wt_path")
+  } || true
+done < <(git worktree list)
+
+# Phase 2: Check local branches (not in worktrees)
+worktree_branches=()
+while IFS= read -r line; do
+  worktree_branches+=("$(echo "$line" | sed 's/.*\[//' | sed 's/\]//')")
+done < <(git worktree list)
+
+while IFS= read -r branch; do
+  branch="${branch#"${branch%%[![:space:]]*}"}"  # trim leading whitespace
+  [[ "$branch" == "$BASE_BRANCH" ]] && continue
+  [[ "$branch" == "$current_branch" ]] && continue
+
+  # Skip branches checked out in worktrees (handled above)
+  skip=false
+  for wb in "${worktree_branches[@]}"; do
+    [[ "$branch" == "$wb" ]] && skip=true && break
+  done
+  $skip && continue
+
+  reason=$(is_merged "$branch" 2>/dev/null) && {
+    echo "branch    $branch — $reason"
+    merged_branches+=("$branch")
+  } || true
+done < <(git branch --format='%(refname:short)')
+
+# Summary
+total=$(( ${#merged_worktrees[@]} + ${#merged_branches[@]} ))
+echo ""
+if [[ $total -eq 0 ]]; then
+  echo "Nothing to clean up."
+  exit 0
+fi
+
+echo "Found $total merged item(s)."
+
+if $DRY_RUN; then
+  echo "Run with --delete to remove them."
+  exit 0
+fi
+
+# Delete
+for wt in "${merged_worktrees[@]}"; do
+  echo "Removing worktree $wt ..."
+  git worktree remove "$wt"
+done
+
+for branch in "${merged_branches[@]}"; do
+  echo "Deleting branch $branch ..."
+  git branch -D "$branch"
+done
+
+echo "Done."

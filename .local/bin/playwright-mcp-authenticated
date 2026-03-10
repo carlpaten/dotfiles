@@ -1,0 +1,248 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+MCP_PACKAGE_DEFAULT="@playwright/mcp@0.0.68"
+STORAGE_STATE_DEFAULT="$HOME/.config/playwright-mcp/shared-storage-state.json"
+
+MCP_PACKAGE="$MCP_PACKAGE_DEFAULT"
+storage_state_path="${PLAYWRIGHT_STORAGE_STATE_PATH:-$STORAGE_STATE_DEFAULT}"
+headless="true"
+bw_hostnames=()
+forward_args=()
+
+tmp_dir=""
+secrets_file=""
+
+usage() {
+  cat <<'USAGE'
+Usage:
+  playwright-mcp-authenticated [options] [-- <extra @playwright/mcp args>]
+
+Options:
+  --bw-hostname <host>      Bitwarden hostname matcher (for example: login.microsoftonline.com). Repeatable.
+  --storage-state <path>    Playwright storage state path (default: ~/.config/playwright-mcp/shared-storage-state.json).
+  --headless                Run browser headless (default).
+  --headed                  Run browser headed.
+  -h, --help                Show this help.
+
+Notes:
+  - If one or more --bw-hostname values are provided, this script creates a temporary
+    secrets file, passes it to Playwright MCP via --secrets, then deletes it on exit.
+  - Do not pass --secrets directly to this wrapper.
+USAGE
+}
+
+require_cmd() {
+  local cmd="$1"
+  if ! command -v "$cmd" >/dev/null 2>&1; then
+    echo "Error: required command not found: $cmd" >&2
+    exit 1
+  fi
+}
+
+sanitize_key() {
+  local raw="$1"
+  local key
+  key="$(printf '%s' "$raw" | tr '[:lower:]' '[:upper:]' | sed -E 's/[^A-Z0-9]+/_/g; s/^_+//; s/_+$//; s/__+/_/g')"
+  if [[ -z "$key" ]]; then
+    key="SECRET"
+  fi
+  printf '%s\n' "$key"
+}
+
+dotenv_quote() {
+  local value="$1"
+  value="${value//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  value="${value//$'\n'/\\n}"
+  printf '"%s"' "$value"
+}
+
+cleanup() {
+  if [[ -n "$secrets_file" && -f "$secrets_file" ]]; then
+    rm -f "$secrets_file"
+  fi
+  if [[ -n "$tmp_dir" && -d "$tmp_dir" ]]; then
+    rmdir "$tmp_dir" 2>/dev/null || true
+  fi
+}
+trap cleanup EXIT INT TERM
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --bw-hostname)
+      bw_hostnames+=("${2:-}")
+      shift 2
+      ;;
+    --storage-state)
+      storage_state_path="${2:-}"
+      shift 2
+      ;;
+    --headless)
+      headless="true"
+      shift
+      ;;
+    --headed)
+      headless="false"
+      shift
+      ;;
+    --bw-item|--bw-item=*)
+      echo "Error: --bw-item is no longer supported. Use --bw-hostname instead." >&2
+      exit 1
+      ;;
+    --bw-url|--bw-url=*)
+      echo "Error: --bw-url is no longer supported. Use --bw-hostname instead." >&2
+      exit 1
+      ;;
+    --secrets|--secrets=*)
+      echo "Error: do not pass --secrets to this wrapper. Use --bw-hostname instead." >&2
+      exit 1
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    --)
+      shift
+      while [[ $# -gt 0 ]]; do
+        forward_args+=("$1")
+        shift
+      done
+      ;;
+    *)
+      forward_args+=("$1")
+      shift
+      ;;
+  esac
+done
+
+require_cmd npx
+
+if [[ "${#bw_hostnames[@]}" -gt 0 ]]; then
+  require_cmd bw
+  require_cmd jq
+
+  bw_session_token="${BW_SESSION:-}"
+  if [[ -z "$bw_session_token" ]]; then
+    if [[ ! -f "$HOME/bitwarden_unlock" ]]; then
+      echo "Error: BW_SESSION is unset and ~/bitwarden_unlock was not found." >&2
+      exit 1
+    fi
+    # shellcheck source=/dev/null
+    source "$HOME/bitwarden_unlock"
+    bw_session_token="${BW_SESSION:-}"
+    if [[ -z "$bw_session_token" ]]; then
+      echo "Error: ~/bitwarden_unlock did not set BW_SESSION." >&2
+      exit 1
+    fi
+  fi
+
+  bw sync --session "$bw_session_token" >/dev/null
+
+  tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/playwright-mcp-secrets-XXXXXX")"
+  secrets_file="$tmp_dir/secrets.env"
+  touch "$secrets_file"
+  chmod 600 "$secrets_file"
+
+  declare -A written_keys=()
+  declare -A prefix_counts=()
+  first_item="true"
+  selected_item_count=0
+  declare -A seen_item_ids=()
+  selected_item_ids=()
+
+  append_secret() {
+    local key="$1"
+    local value="$2"
+    if [[ -z "$value" ]]; then
+      return
+    fi
+    if [[ -n "${written_keys[$key]:-}" ]]; then
+      return
+    fi
+    printf '%s=%s\n' "$key" "$(dotenv_quote "$value")" >> "$secrets_file"
+    written_keys["$key"]=1
+  }
+
+  for bw_hostname in "${bw_hostnames[@]}"; do
+    while IFS= read -r item_id; do
+      if [[ -z "$item_id" ]]; then
+        continue
+      fi
+      if [[ -n "${seen_item_ids[$item_id]:-}" ]]; then
+        continue
+      fi
+      seen_item_ids["$item_id"]=1
+      selected_item_ids+=("$item_id")
+    done < <(
+      bw list items --url "$bw_hostname" --session "$bw_session_token" \
+        | jq -r '.[] | .id // empty'
+    )
+  done
+
+  if [[ "${#selected_item_ids[@]}" -eq 0 ]]; then
+    echo "Error: no Bitwarden items matched provided --bw-hostname values." >&2
+    exit 1
+  fi
+
+  for item_id in "${selected_item_ids[@]}"; do
+    item_json="$(bw get item "$item_id" --session "$bw_session_token")"
+
+    item_name="$(jq -r '.name // "item"' <<<"$item_json")"
+    prefix_base="$(sanitize_key "$item_name")"
+    count="${prefix_counts[$prefix_base]:-0}"
+    count="$((count + 1))"
+    prefix_counts["$prefix_base"]="$count"
+    if [[ "$count" -eq 1 ]]; then
+      prefix="$prefix_base"
+    else
+      prefix="${prefix_base}_${count}"
+    fi
+
+    username="$(jq -r '.login.username // empty' <<<"$item_json")"
+    password="$(jq -r '.login.password // empty' <<<"$item_json")"
+    totp="$(jq -r '.login.totp // empty' <<<"$item_json")"
+    if [[ -z "$username" && -z "$password" && -z "$totp" ]]; then
+      continue
+    fi
+
+    selected_item_count="$((selected_item_count + 1))"
+
+    append_secret "${prefix}_USERNAME" "$username"
+    append_secret "${prefix}_PASSWORD" "$password"
+    append_secret "${prefix}_TOTP" "$totp"
+
+    while IFS=$'\t' read -r field_name field_value; do
+      field_key="$(sanitize_key "$field_name")"
+      append_secret "${prefix}_${field_key}" "$field_value"
+    done < <(jq -r '.fields[]? | select((.value // "") != "") | [(.name // "FIELD"), .value] | @tsv' <<<"$item_json")
+
+    if [[ "$first_item" == "true" ]]; then
+      append_secret "USERNAME" "$username"
+      append_secret "PASSWORD" "$password"
+      append_secret "TOTP" "$totp"
+      if [[ "$username" == *"@"* ]]; then
+        append_secret "EMAIL" "$username"
+      fi
+      first_item="false"
+    fi
+  done
+
+  if [[ "$selected_item_count" -eq 0 ]]; then
+    echo "Error: no usable credentials extracted from items matched by --bw-hostname." >&2
+    exit 1
+  fi
+fi
+
+mkdir -p "$(dirname "$storage_state_path")"
+
+mcp_args=("$MCP_PACKAGE" "--isolated" "--storage-state" "$storage_state_path")
+if [[ "$headless" == "true" ]]; then
+  mcp_args+=("--headless")
+fi
+if [[ -n "$secrets_file" ]]; then
+  mcp_args+=("--secrets" "$secrets_file")
+fi
+mcp_args+=("${forward_args[@]}")
+
+exec npx "${mcp_args[@]}"

@@ -11,3 +11,6 @@ for f in ~/.shell.d/*.sh ~/.shell.d/*.bash; do
     [ -r "$f" ] && . "$f"
 done
 unset f
+
+# opencode
+export PATH=/home/carl/.opencode/bin:$PATH

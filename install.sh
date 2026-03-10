@@ -20,7 +20,26 @@ link .bashrc
 link .zshrc
 link .shell.d
 link .tmux.conf
+link .scripts
 link .local/bin/notify-send
+link .local/bin/claude_usage
+link .local/bin/git-prune-merged
+link .local/bin/playwright-mcp-authenticated
+link .local/bin/pi-playwright-signin-state-from-bitwarden
+link .cursor/mcp.json
+link AGENTS.md
+
+# AGENTS.md is the source of truth; symlink it as CLAUDE.md for Claude Code
+agents_src="$DOTFILES/AGENTS.md"
+agents_dst="$HOME/CLAUDE.md"
+if [ -L "$agents_dst" ]; then
+    rm "$agents_dst"
+elif [ -e "$agents_dst" ]; then
+    echo "backing up ~/CLAUDE.md -> ~/CLAUDE.md.bak"
+    mv "$agents_dst" "$agents_dst.bak"
+fi
+ln -s "$agents_src" "$agents_dst"
+echo "linked ~/CLAUDE.md -> $agents_src"
 
 # SSH authorized keys
 keys=("$DOTFILES"/ssh-keys/*.pub)
@@ -52,37 +71,15 @@ if [ ${#keys[@]} -gt 0 ]; then
     fi
 fi
 
-# Claude MCP servers
-if [ -f "$DOTFILES/mcps.json" ] && command -v jq &>/dev/null; then
-    target="$HOME/.claude.json"
-    if [ -f "$target" ]; then
-        jq --slurpfile mcps "$DOTFILES/mcps.json" '.mcpServers = $mcps[0]' "$target" > "$target.tmp" \
-            && mv "$target.tmp" "$target"
-    else
-        jq -n --slurpfile mcps "$DOTFILES/mcps.json" '{mcpServers: $mcps[0]}' > "$target"
-    fi
-    echo "merged mcps.json -> ~/.claude.json"
-fi
+# Claude MCP servers and statusline
+"$DOTFILES/install-mcps.sh"
+"$DOTFILES/install-statusline.sh"
+"$DOTFILES/install-skills.sh"
 
-# Pre-commit hook for Claude MCP extraction
+# Pre-commit hook
 hook="$DOTFILES/.git/hooks/pre-commit"
-cat > "$hook" << 'HOOK'
-#!/usr/bin/env bash
-set -euo pipefail
-DOTFILES="$(cd "$(dirname "$0")/../.." && pwd)"
-target="$HOME/.claude.json"
-if [ -f "$target" ] && command -v jq &>/dev/null; then
-    jq '.mcpServers // {}' "$target" > "$DOTFILES/mcps.json.tmp"
-    if ! diff -q "$DOTFILES/mcps.json.tmp" "$DOTFILES/mcps.json" &>/dev/null; then
-        mv "$DOTFILES/mcps.json.tmp" "$DOTFILES/mcps.json"
-        git add "$DOTFILES/mcps.json"
-        echo "updated mcps.json from ~/.claude.json"
-    else
-        rm "$DOTFILES/mcps.json.tmp"
-    fi
-fi
-HOOK
-chmod +x "$hook"
+ln -sf "$DOTFILES/hooks/pre-commit" "$hook"
+chmod +x "$DOTFILES/hooks/pre-commit"
 echo "installed pre-commit hook"
 
 echo ""

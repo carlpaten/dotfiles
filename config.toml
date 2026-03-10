@@ -1,0 +1,19 @@
+model = "gpt-5.3-codex"
+model_reasoning_effort = "high"
+
+[projects."/home/carl"]
+trust_level = "trusted"
+
+[projects."/home/carl/factorio-codex"]
+trust_level = "trusted"
+
+[projects."/home/carl/macrosoft"]
+trust_level = "trusted"
+
+[mcp_servers.playwright]
+command = "/home/carl/.local/bin/playwright-mcp-authenticated"
+args = []
+startup_timeout_sec = 90.0
+
+[mcp_servers.linear]
+url = "https://mcp.linear.app/mcp"

@@ -1,0 +1,4 @@
+{
+  "type": "command",
+  "command": "python3 ~/.claude/usage-statusline.py"
+}
