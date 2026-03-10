@@ -50,35 +50,164 @@ if ! [[ "$interval_seconds" =~ ^[0-9]+$ ]] || (( interval_seconds <= 0 )); then
 fi
 
 viewer_login="$(gh api user --jq '.login')"
+pr_url="$(gh pr view "$pr_ref" --json url --jq '.url')"
+
+if [[ "$pr_url" =~ ^https://github\.com/([^/]+)/([^/]+)/pull/([0-9]+)$ ]]; then
+  repo_owner="${BASH_REMATCH[1]}"
+  repo_name="${BASH_REMATCH[2]}"
+  pr_number="${BASH_REMATCH[3]}"
+else
+  echo "error: could not parse PR URL: $pr_url" >&2
+  exit 1
+fi
 
 snapshot() {
-  gh pr view "$pr_ref" --json comments,reviews,statusCheckRollup | jq --arg viewer "$viewer_login" '
+  local pr_json
+  local review_threads_json
+
+  pr_json="$(gh pr view "$pr_ref" --json comments,reviews,statusCheckRollup)"
+  review_threads_json="$(
+    gh api graphql \
+      -f query='
+        query($owner:String!, $name:String!, $number:Int!) {
+          repository(owner: $owner, name: $name) {
+            pullRequest(number: $number) {
+              reviewThreads(first: 100) {
+                nodes {
+                  isResolved
+                  comments(first: 100) {
+                    nodes {
+                      id
+                      body
+                      createdAt
+                      url
+                      author {
+                        login
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      ' \
+      -F owner="$repo_owner" \
+      -F name="$repo_name" \
+      -F number="$pr_number"
+  )"
+
+  jq -n \
+    --arg viewer "$viewer_login" \
+    --argjson pr "$pr_json" \
+    --argjson review_threads "$review_threads_json" '
+      def summarize($body):
+        $body
+        | gsub("\\s+"; " ")
+        | if length > 140 then .[:137] + "..." else . end;
+
+      def failed_check_conclusion($value):
+        ["FAILURE", "TIMED_OUT", "STARTUP_FAILURE", "ACTION_REQUIRED", "STALE"]
+        | index($value) != null;
+
+      def failed_status_state($value):
+        ["FAILURE", "ERROR"]
+        | index($value) != null;
+
       {
-        externalCommentCount: (
-          [.comments[]? | select((.author.login // "") != $viewer)] | length
+        feedbackItems: (
+          [
+            $pr.comments[]?
+            | select((.author.login // "") != $viewer)
+            | {
+                id,
+                source: "issue-comment",
+                author: (.author.login // ""),
+                createdAt: (.createdAt // ""),
+                url: (.url // ""),
+                state: "",
+                summary: summarize(.body // "")
+              }
+          ]
+          +
+          [
+            $pr.reviews[]?
+            | select(
+                (.author.login // "") != $viewer
+                and (
+                  ((.body // "") | gsub("\\s+"; "") | length) > 0
+                  or ((.state // "") != "APPROVED")
+                )
+              )
+            | {
+                id,
+                source: "review",
+                author: (.author.login // ""),
+                createdAt: (.submittedAt // ""),
+                url: "",
+                state: (.state // ""),
+                summary: summarize(.body // "")
+              }
+          ]
+          +
+          [
+            $review_threads.data.repository.pullRequest.reviewThreads.nodes[]? as $thread
+            | $thread.comments.nodes[]?
+            | select((.author.login // "") != $viewer)
+            | {
+                id,
+                source: (
+                  if $thread.isResolved then
+                    "resolved-thread-comment"
+                  else
+                    "thread-comment"
+                  end
+                ),
+                author: (.author.login // ""),
+                createdAt: (.createdAt // ""),
+                url: (.url // ""),
+                state: "",
+                summary: summarize(.body // "")
+              }
+          ]
+          | sort_by(.createdAt, .id)
         ),
-        externalReviewCount: (
-          [.reviews[]? | select((.author.login // "") != $viewer)] | length
+        feedbackIds: (
+          [
+            $pr.comments[]?
+            | select((.author.login // "") != $viewer)
+            | .id
+          ]
+          +
+          [
+            $pr.reviews[]?
+            | select(
+                (.author.login // "") != $viewer
+                and (
+                  ((.body // "") | gsub("\\s+"; "") | length) > 0
+                  or ((.state // "") != "APPROVED")
+                )
+              )
+            | .id
+          ]
+          +
+          [
+            $review_threads.data.repository.pullRequest.reviewThreads.nodes[]?.comments.nodes[]?
+            | select((.author.login // "") != $viewer)
+            | .id
+          ]
         ),
         redChecks: [
-          .statusCheckRollup[]?
+          $pr.statusCheckRollup[]?
           | select(
               (
                 .__typename == "CheckRun"
-                and (
-                  [
-                    "FAILURE",
-                    "TIMED_OUT",
-                    "STARTUP_FAILURE",
-                    "ACTION_REQUIRED"
-                  ]
-                  | index(.conclusion)
-                ) != null
+                and failed_check_conclusion(.conclusion // "")
               )
               or
               (
                 .__typename == "StatusContext"
-                and (["FAILURE", "ERROR"] | index(.state)) != null
+                and failed_status_state(.state // "")
               )
             )
           | {
@@ -92,16 +221,23 @@ snapshot() {
 }
 
 baseline="$(snapshot)"
-baseline_comments="$(jq -r '.externalCommentCount' <<<"$baseline")"
-baseline_reviews="$(jq -r '.externalReviewCount' <<<"$baseline")"
 
 deadline=$((SECONDS + timeout_seconds))
 
 while (( SECONDS < deadline )); do
   current="$(snapshot)"
-  current_comments="$(jq -r '.externalCommentCount' <<<"$current")"
-  current_reviews="$(jq -r '.externalReviewCount' <<<"$current")"
   red_count="$(jq -r '.redChecks | length' <<<"$current")"
+  new_feedback="$(
+    jq -n --argjson baseline "$baseline" --argjson current "$current" '
+      ($baseline.feedbackIds // []) as $baseline_ids
+      | [
+          $current.feedbackItems[]?
+          | . as $item
+          | select(($baseline_ids | index($item.id)) == null)
+        ]
+    '
+  )"
+  new_feedback_count="$(jq -r 'length' <<<"$new_feedback")"
 
   if (( red_count > 0 )); then
     echo "signal=red-check"
@@ -109,10 +245,9 @@ while (( SECONDS < deadline )); do
     exit 0
   fi
 
-  if (( current_comments > baseline_comments || current_reviews > baseline_reviews )); then
+  if (( new_feedback_count > 0 )); then
     echo "signal=feedback"
-    echo "comments_before=$baseline_comments comments_now=$current_comments"
-    echo "reviews_before=$baseline_reviews reviews_now=$current_reviews"
+    jq -r '.[] | "- [\(.source)] @\(.author) \(.createdAt) \(.url)\n  \(.summary)"' <<<"$new_feedback"
     exit 0
   fi
 

@@ -20,7 +20,7 @@ description: "Run GitHub PR workflow: semantic title, CI loop to green, accurate
    - `git fetch origin dev && git merge origin/dev`
 3. Push changes.
 4. Run CI loop until green.
-   - Run: `/home/carl/.scripts/poll-pr-feedback-or-red.sh <pr-number> 600 15`
+   - Run: `$HOME/.scripts/poll-pr-feedback-or-red.sh <pr-number> 600 15`
    - If it prints `signal=red-check`, fix failures and repeat from step 2.
    - If it prints `signal=feedback`, respond to feedback and continue iteration.
    - If it prints `signal=timeout`, treat as no-news and continue.
