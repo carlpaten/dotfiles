@@ -110,5 +110,11 @@ ln -sf "$DOTFILES/hooks/pre-commit" "$hook"
 chmod +x "$DOTFILES/hooks/pre-commit"
 echo "installed pre-commit hook"
 
+case "$(basename "${SHELL:-}")" in
+    zsh) source_path="~/.zshrc" ;;
+    bash) source_path="~/.bashrc" ;;
+    *) source_path="~/.bashrc" ;;
+esac
+
 echo ""
-echo "done — restart your shell or: source ~/.bashrc"
+echo "done — restart your shell or: source $source_path"
