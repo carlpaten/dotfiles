@@ -6,11 +6,12 @@ usage() {
 Usage: poll-pr-feedback-or-red.sh <pr-number|url|branch> <timeout-seconds> [interval-seconds]
 
 Poll a PR until one of these happens:
-1) New feedback appears (new non-self PR comments or reviews)
+1) Actionable review feedback exists (unresolved non-self review-thread comments)
 2) A status check turns red
+3) All status checks are green
 
 Exit codes:
-0   Completed poll window (feedback, red checks, or timeout)
+0   Completed poll window (feedback, red checks, green checks, or timeout)
 1   Usage or runtime error
 EOF
 }
@@ -114,55 +115,39 @@ snapshot() {
         ["FAILURE", "ERROR"]
         | index($value) != null;
 
+      def pending_check($check):
+        (
+          $check.__typename == "CheckRun"
+          and ($check.status // "") != "COMPLETED"
+        )
+        or
+        (
+          $check.__typename == "StatusContext"
+          and (["EXPECTED", "PENDING"] | index($check.state // "")) != null
+        );
+
+      def green_check($check):
+        (
+          $check.__typename == "CheckRun"
+          and ($check.status // "") == "COMPLETED"
+          and (["SUCCESS", "NEUTRAL", "SKIPPED"] | index($check.conclusion // "")) != null
+        )
+        or
+        (
+          $check.__typename == "StatusContext"
+          and (["SUCCESS"] | index($check.state // "")) != null
+        );
+
       {
         feedbackItems: (
           [
-            $pr.comments[]?
-            | select((.author.login // "") != $viewer)
-            | {
-                id,
-                source: "issue-comment",
-                author: (.author.login // ""),
-                createdAt: (.createdAt // ""),
-                url: (.url // ""),
-                state: "",
-                summary: summarize(.body // "")
-              }
-          ]
-          +
-          [
-            $pr.reviews[]?
-            | select(
-                (.author.login // "") != $viewer
-                and (
-                  ((.body // "") | gsub("\\s+"; "") | length) > 0
-                  or ((.state // "") != "APPROVED")
-                )
-              )
-            | {
-                id,
-                source: "review",
-                author: (.author.login // ""),
-                createdAt: (.submittedAt // ""),
-                url: "",
-                state: (.state // ""),
-                summary: summarize(.body // "")
-              }
-          ]
-          +
-          [
             $review_threads.data.repository.pullRequest.reviewThreads.nodes[]? as $thread
+            | select(($thread.isResolved // false) == false)
             | $thread.comments.nodes[]?
             | select((.author.login // "") != $viewer)
             | {
                 id,
-                source: (
-                  if $thread.isResolved then
-                    "resolved-thread-comment"
-                  else
-                    "thread-comment"
-                  end
-                ),
+                source: "thread-comment",
                 author: (.author.login // ""),
                 createdAt: (.createdAt // ""),
                 url: (.url // ""),
@@ -171,31 +156,6 @@ snapshot() {
               }
           ]
           | sort_by(.createdAt, .id)
-        ),
-        feedbackIds: (
-          [
-            $pr.comments[]?
-            | select((.author.login // "") != $viewer)
-            | .id
-          ]
-          +
-          [
-            $pr.reviews[]?
-            | select(
-                (.author.login // "") != $viewer
-                and (
-                  ((.body // "") | gsub("\\s+"; "") | length) > 0
-                  or ((.state // "") != "APPROVED")
-                )
-              )
-            | .id
-          ]
-          +
-          [
-            $review_threads.data.repository.pullRequest.reviewThreads.nodes[]?.comments.nodes[]?
-            | select((.author.login // "") != $viewer)
-            | .id
-          ]
         ),
         redChecks: [
           $pr.statusCheckRollup[]?
@@ -215,29 +175,29 @@ snapshot() {
               state: (.conclusion // .state // "UNKNOWN"),
               url: (.detailsUrl // .targetUrl // "")
             }
-        ]
+        ],
+        totalChecks: ([$pr.statusCheckRollup[]?] | length),
+        pendingCheckCount: (
+          [$pr.statusCheckRollup[]? | select(pending_check(.))]
+          | length
+        ),
+        greenCheckCount: (
+          [$pr.statusCheckRollup[]? | select(green_check(.))]
+          | length
+        )
       }
     '
 }
-
-baseline="$(snapshot)"
 
 deadline=$((SECONDS + timeout_seconds))
 
 while (( SECONDS < deadline )); do
   current="$(snapshot)"
   red_count="$(jq -r '.redChecks | length' <<<"$current")"
-  new_feedback="$(
-    jq -n --argjson baseline "$baseline" --argjson current "$current" '
-      ($baseline.feedbackIds // []) as $baseline_ids
-      | [
-          $current.feedbackItems[]?
-          | . as $item
-          | select(($baseline_ids | index($item.id)) == null)
-        ]
-    '
-  )"
-  new_feedback_count="$(jq -r 'length' <<<"$new_feedback")"
+  total_checks="$(jq -r '.totalChecks' <<<"$current")"
+  pending_check_count="$(jq -r '.pendingCheckCount' <<<"$current")"
+  green_check_count="$(jq -r '.greenCheckCount' <<<"$current")"
+  feedback_count="$(jq -r '.feedbackItems | length' <<<"$current")"
 
   if (( red_count > 0 )); then
     echo "signal=red-check"
@@ -245,9 +205,15 @@ while (( SECONDS < deadline )); do
     exit 0
   fi
 
-  if (( new_feedback_count > 0 )); then
+  if (( feedback_count > 0 )); then
     echo "signal=feedback"
-    jq -r '.[] | "- [\(.source)] @\(.author) \(.createdAt) \(.url)\n  \(.summary)"' <<<"$new_feedback"
+    jq -r '.feedbackItems[] | "- [\(.source)] @\(.author) \(.createdAt) \(.url)\n  \(.summary)"' <<<"$current"
+    exit 0
+  fi
+
+  if (( total_checks > 0 && pending_check_count == 0 && green_check_count == total_checks )); then
+    echo "signal=green"
+    echo "checks_green=$green_check_count"
     exit 0
   fi
 
