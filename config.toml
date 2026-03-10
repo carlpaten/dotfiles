@@ -17,3 +17,6 @@ startup_timeout_sec = 90.0
 
 [mcp_servers.linear]
 url = "https://mcp.linear.app/mcp"
+
+[features]
+multi_agent = true

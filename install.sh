@@ -3,6 +3,31 @@ set -euo pipefail
 
 DOTFILES="$(cd "$(dirname "$0")" && pwd)"
 
+# ── Setup scripts ──────────────────────────────────────────────────────────────
+"$DOTFILES/scripts/homebrew.sh"
+
+# Bring brew into PATH for the rest of this session
+case "$OSTYPE" in
+    darwin*) eval "$(/opt/homebrew/bin/brew shellenv)" 2>/dev/null || true ;;
+    linux*)  eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)" 2>/dev/null || true ;;
+esac
+
+"$DOTFILES/scripts/packages.sh"
+
+# Bring fnm (just installed) into PATH so node.sh and pnpm.sh can use it
+if command -v fnm &>/dev/null; then
+    eval "$(fnm env)"
+fi
+
+"$DOTFILES/scripts/node.sh"
+"$DOTFILES/scripts/pnpm.sh"
+"$DOTFILES/scripts/codex.sh"
+"$DOTFILES/scripts/claude.sh"
+"$DOTFILES/scripts/ssh-keygen.sh"
+"$DOTFILES/scripts/git.sh"
+echo ""
+
+# ── Symlinks ───────────────────────────────────────────────────────────────────
 link() {
     local src="$DOTFILES/$1" dst="$HOME/$1"
     if [ -L "$dst" ]; then

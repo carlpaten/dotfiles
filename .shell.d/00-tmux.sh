@@ -11,6 +11,7 @@
 #     && [ -z "${TMUX:-}" ] \
 #     && [ -z "${INSIDE_EMACS:-}" ] \
 #     && [ -z "${VSCODE_PID:-}" ] \
+#     && [ -z "${SSH_TTY:-}" ] \
 #     && [ -z "${AUTO_TMUX_DISABLE:-}" ] \
 #     && [ -t 0 ] && [ -t 1 ]; then
 #     tmux new-session -A -s main && exit

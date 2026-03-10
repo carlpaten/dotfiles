@@ -7,6 +7,9 @@
     ]
   },
   "playwright": {
-    "command": "/home/carl/.local/bin/playwright-mcp-authenticated"
+    "command": "npx",
+    "args": [
+      "@playwright/mcp@latest"
+    ]
   }
 }
