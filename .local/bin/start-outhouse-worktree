@@ -89,40 +89,88 @@ ensure_worktree() {
     printf 'created|%s\n' "$branch_to_create"
 }
 
-ensure_tmux_session_macos() {
-    local tmux_session="$1"
+ensure_tmux_window_macos() {
+    local tmux_window_name="$1"
     local worktree_path="$2"
     local dev_port="$3"
     local dev_command
+    local current_pane
+    local current_session
+    local window_id
     local top_pane
     local bottom_pane
 
-    dev_command="cd \"$worktree_path\" && pnpm install && (printf 'a\\n\\n' | pnpm approve-builds || true) && PORT=\"$dev_port\" pnpm dev -- --port \"$dev_port\""
+    [[ -n "${TMUX:-}" ]] || die "On macOS, run this command from inside an existing tmux session."
 
-    if tmux has-session -t "$tmux_session" 2>/dev/null; then
-        local pane_count
-        pane_count="$(tmux list-panes -t "$tmux_session" -F '#{pane_id}' | wc -l | tr -d ' ')"
-        top_pane="$(tmux list-panes -t "$tmux_session" -F '#{pane_id}' | head -n1)"
-        if [[ "${pane_count:-0}" -lt 2 && -n "$top_pane" ]]; then
-            bottom_pane="$(tmux split-window -v -P -F '#{pane_id}' -t "$top_pane" -c "$worktree_path")"
-            tmux send-keys -t "$bottom_pane" "$dev_command" C-m
-            tmux select-layout -t "$tmux_session" even-vertical >/dev/null 2>&1 || true
-        fi
-        return 0
+    dev_command="cd \"$worktree_path\" && pnpm install && (printf 'a\\n\\n' | pnpm approve-builds || true) && PORT=\"$dev_port\" pnpm dev:outhouse -- --port \"$dev_port\""
+    current_pane="${TMUX_PANE:-}"
+    [[ -n "$current_pane" ]] || die "Unable to determine the current tmux pane."
+    current_session="$(tmux display-message -p -t "$current_pane" '#S' 2>/dev/null || true)"
+    [[ -n "$current_session" ]] || die "Unable to determine the current tmux session."
+
+    window_id="$(tmux list-windows -t "$current_session" -F '#{window_id} #{window_name}' \
+        | awk -v target="$tmux_window_name" '$2 == target { print $1; exit }')"
+
+    if [[ -z "$window_id" ]]; then
+        window_id="$(tmux new-window -P -F '#{window_id}' -t "$current_session:" -n "$tmux_window_name" -c "$worktree_path")"
     fi
 
-    tmux new-session -d -s "$tmux_session" -c "$worktree_path"
-    top_pane="$(tmux list-panes -t "$tmux_session" -F '#{pane_id}' | head -n1)"
-    [[ -n "$top_pane" ]] || die "Failed to determine tmux pane for session $tmux_session."
-    bottom_pane="$(tmux split-window -v -P -F '#{pane_id}' -t "$top_pane" -c "$worktree_path")"
+    local pane_count
+    local bottom_command
+    top_pane="$(tmux list-panes -t "$window_id" -F '#{pane_id}' | head -n1)"
+    [[ -n "$top_pane" ]] || die "Failed to determine tmux pane for window $tmux_window_name."
+    pane_count="$(tmux list-panes -t "$window_id" -F '#{pane_id}' | wc -l | tr -d ' ')"
+
+    tmux send-keys -t "$top_pane" C-c
+    tmux send-keys -t "$top_pane" "cd \"$worktree_path\"" C-m
+
+    if [[ "${pane_count:-0}" -lt 2 ]]; then
+        bottom_pane="$(tmux split-window -v -P -F '#{pane_id}' -t "$top_pane" -c "$worktree_path")"
+    else
+        bottom_pane="$(tmux list-panes -t "$window_id" -F '#{pane_id}' | tail -n1)"
+    fi
+
+    bottom_command="$(tmux display-message -p -t "$bottom_pane" '#{pane_current_command}' || true)"
+    if [[ "$bottom_command" == "bash" || "$bottom_command" == "zsh" || "$bottom_command" == "sh" || "$bottom_command" == "fish" ]]; then
+        tmux send-keys -t "$bottom_pane" C-c
+    fi
     tmux send-keys -t "$bottom_pane" "$dev_command" C-m
-    tmux select-layout -t "$tmux_session" even-vertical >/dev/null 2>&1 || true
+    tmux select-layout -t "$window_id" even-vertical >/dev/null 2>&1 || true
+    tmux select-window -t "$window_id" >/dev/null 2>&1 || true
+
+    printf '%s|%s|%s\n' "$current_session" "$window_id" "$bottom_pane"
+}
+
+tmux_dev_pane_exited_macos() {
+    local dev_pane="$1"
+    local pane_command last_line
+
+    if ! tmux list-panes -a -F '#{pane_id}' | grep -Fxq "$dev_pane"; then
+        return 1
+    fi
+
+    pane_command="$(tmux display-message -p -t "$dev_pane" '#{pane_current_command}' || true)"
+    if [[ "$pane_command" != "bash" && "$pane_command" != "zsh" && "$pane_command" != "sh" && "$pane_command" != "fish" ]]; then
+        return 1
+    fi
+
+    last_line="$(tmux capture-pane -pt "$dev_pane" -S -20 | sed '/^[[:space:]]*$/d' | tail -n1)"
+    [[ "$last_line" == *'% ' || "$last_line" == *'$ ' || "$last_line" == *'# ' ]]
+}
+
+capture_tmux_dev_pane_macos() {
+    local dev_pane="$1"
+
+    if ! tmux list-panes -a -F '#{pane_id}' | grep -Fxq "$dev_pane"; then
+        return 1
+    fi
+
+    tmux capture-pane -pt "$dev_pane" -S -80
 }
 
 open_worktree_macos() {
     local main_worktree_path="$1"
     local issue_key="$2"
-    local reference_url="$3"
 
     require_command git "git not found in PATH."
     require_command tmux "tmux not found in PATH."
@@ -145,7 +193,7 @@ open_worktree_macos() {
 
     git -C "$main_repo_root" fetch --quiet origin dev || die "Failed to fetch origin/dev from $main_repo_root"
 
-    local branch_base branch_to_create worktree_result branch_name reused_worktree tmux_session
+    local branch_base branch_to_create worktree_result branch_name reused_worktree tmux_window_name tmux_window_result tmux_session tmux_window_id dev_pane
     branch_base="feature/${repo_name}-${issue_slug}"
     branch_to_create="$(next_available_branch "$main_repo_root" "$branch_base")"
     worktree_result="$(ensure_worktree "$main_repo_root" "$worktree_path" "$branch_to_create" "origin/dev")"
@@ -155,34 +203,57 @@ open_worktree_macos() {
         reused_worktree="true"
     fi
 
-    tmux_session="desk-${repo_name}-${issue_slug}"
-    ensure_tmux_session_macos "$tmux_session" "$worktree_path" "$dev_port"
-
-    if command -v open >/dev/null 2>&1; then
-        open "http://localhost:${dev_port}" >/dev/null 2>&1 || true
-        open "https://linear.app/issue/${issue_key}" >/dev/null 2>&1 || true
-        if [[ -n "$reference_url" ]]; then
-            open "$reference_url" >/dev/null 2>&1 || true
-        fi
-    fi
+    tmux_window_name="desk-${repo_name}-${issue_slug}"
+    tmux_window_result="$(ensure_tmux_window_macos "$tmux_window_name" "$worktree_path" "$dev_port")"
+    tmux_session="${tmux_window_result%%|*}"
+    tmux_window_result="${tmux_window_result#*|}"
+    tmux_window_id="${tmux_window_result%%|*}"
+    dev_pane="${tmux_window_result##*|}"
 
     echo "Created worktree: $worktree_path"
     echo "Created branch: $branch_name"
     if [[ "$reused_worktree" == "true" ]]; then
         echo "Reused existing worktree directory."
     fi
-    echo "Opened tmux session: $tmux_session"
+    echo "Using tmux session: $tmux_session"
+    echo "Using tmux window: $tmux_window_name"
+    echo "Tmux window id: $tmux_window_id"
+    echo "Dev pane: $dev_pane"
     echo "Assigned dev port: $dev_port"
 }
 
 wait_for_server() {
     local port="$1"
     local timeout_seconds="${2:-120}"
+    local dev_pane="${3:-}"
     local elapsed=0
 
     while (( elapsed < timeout_seconds )); do
         if curl -s --max-time 2 "http://localhost:${port}/api/v1/me/mailFolders" >/dev/null 2>&1; then
             return 0
+        fi
+        if [[ -n "$dev_pane" ]] && tmux_dev_pane_exited_macos "$dev_pane"; then
+            return 2
+        fi
+        sleep 1
+        elapsed=$((elapsed + 1))
+    done
+
+    return 1
+}
+
+wait_for_file() {
+    local path="$1"
+    local timeout_seconds="${2:-120}"
+    local dev_pane="${3:-}"
+    local elapsed=0
+
+    while (( elapsed < timeout_seconds )); do
+        if [[ -x "$path" ]]; then
+            return 0
+        fi
+        if [[ -n "$dev_pane" ]] && tmux_dev_pane_exited_macos "$dev_pane"; then
+            return 2
         fi
         sleep 1
         elapsed=$((elapsed + 1))
@@ -192,7 +263,7 @@ wait_for_server() {
 }
 
 if [[ "$(uname -s)" == "Darwin" ]]; then
-    OPEN_OUTPUT="$(open_worktree_macos "$MAIN_WORKTREE_PATH" "$ISSUE_KEY" "$REFERENCE_URL")"
+    OPEN_OUTPUT="$(open_worktree_macos "$MAIN_WORKTREE_PATH" "$ISSUE_KEY")"
 else
     OPEN_OUTPUT="$($OPEN_WORKTREE_SCRIPT --reference-url "$REFERENCE_URL" "$MAIN_WORKTREE_PATH" "$ISSUE_KEY")"
 fi
@@ -208,13 +279,34 @@ REPO_NAME="$(basename "$MAIN_WORKTREE_PATH")"
 PARENT_DIR="$(dirname "$MAIN_WORKTREE_PATH")"
 ISSUE_SLUG="$(slugify "$ISSUE_KEY")"
 WORKTREE_PATH="${PARENT_DIR}/${REPO_NAME}-${ISSUE_SLUG}"
+TMUX_DEV_PANE="$(printf '%s\n' "$OPEN_OUTPUT" | awk -F': ' '/Dev pane:/ {print $2; exit}')"
 
 if [[ ! -d "$WORKTREE_PATH" ]]; then
     echo "Warning: Worktree path not found at $WORKTREE_PATH. Skipping db seed." >&2
     exit 0
 fi
 
-if ! wait_for_server "$DEV_PORT" 120; then
+TOOLS_WAIT_RESULT=0
+wait_for_file "$WORKTREE_PATH/node_modules/.bin/tsx" 120 "$TMUX_DEV_PANE" || TOOLS_WAIT_RESULT=$?
+if [[ "$TOOLS_WAIT_RESULT" -eq 2 ]]; then
+    echo "Warning: Dev pane ${TMUX_DEV_PANE:-unknown} exited before dependencies finished installing. Skipping db seed." >&2
+    capture_tmux_dev_pane_macos "$TMUX_DEV_PANE" >&2 || true
+    exit 0
+fi
+if [[ "$TOOLS_WAIT_RESULT" -ne 0 ]]; then
+    echo "Warning: Dependencies for $WORKTREE_PATH did not finish installing in time. Skipping db seed." >&2
+    exit 0
+fi
+
+WAIT_RESULT=0
+wait_for_server "$DEV_PORT" 120 "$TMUX_DEV_PANE" || WAIT_RESULT=$?
+if [[ "$WAIT_RESULT" -eq 2 ]]; then
+    echo "Warning: Dev pane ${TMUX_DEV_PANE:-unknown} exited before the server became reachable. Skipping db seed." >&2
+    capture_tmux_dev_pane_macos "$TMUX_DEV_PANE" >&2 || true
+    exit 0
+fi
+
+if [[ "$WAIT_RESULT" -ne 0 ]]; then
     echo "Warning: Dev server on port $DEV_PORT did not become reachable in time. Skipping db seed." >&2
     exit 0
 fi
