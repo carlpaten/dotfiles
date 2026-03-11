@@ -20,7 +20,14 @@ formulae=(
     tmux
     shellcheck
     gh
+    gnupg
+    pass
 )
+
+case "$OSTYPE" in
+    darwin*) formulae+=(pinentry-mac) ;;
+    linux*)  formulae+=(pinentry) ;;
+esac
 
 casks=(
     spotify

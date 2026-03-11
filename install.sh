@@ -27,6 +27,7 @@ fi
 "$DOTFILES/scripts/ssh-keygen.sh"
 "$DOTFILES/scripts/git.sh"
 echo ""
+"$DOTFILES/scripts/gpg-pass.sh"
 
 # ── Symlinks ───────────────────────────────────────────────────────────────────
 link() {
