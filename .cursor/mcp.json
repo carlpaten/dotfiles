@@ -10,9 +10,6 @@
         "mcp-remote",
         "https://mcp.linear.app/mcp"
       ]
-    },
-    "playwright": {
-      "command": "/home/carl/.local/bin/playwright-mcp-authenticated"
     }
   }
 }

@@ -10,43 +10,6 @@ if ! command -v jq &>/dev/null; then
     exit 0
 fi
 
-patch_codex_playwright_timeout() {
-    local config_file="$CODEX_CONFIG_FILE"
-    local timeout="90.0"
-
-    if [ ! -f "$config_file" ]; then
-        return 0
-    fi
-
-    awk -v target="[mcp_servers.playwright]" -v timeout="$timeout" '
-        BEGIN { in_target = 0; saw_timeout = 0 }
-        {
-            if ($0 ~ /^\[.*\]/) {
-                if (in_target && !saw_timeout) {
-                    printf "startup_timeout_sec = %s\n", timeout
-                }
-                in_target = ($0 == target)
-                saw_timeout = 0
-                print
-                next
-            }
-
-            if (in_target && $0 ~ /^startup_timeout_sec[[:space:]]*=/) {
-                printf "startup_timeout_sec = %s\n", timeout
-                saw_timeout = 1
-                next
-            }
-
-            print
-        }
-        END {
-            if (in_target && !saw_timeout) {
-                printf "startup_timeout_sec = %s\n", timeout
-            }
-        }
-    ' "$config_file" > "$config_file.tmp" && mv "$config_file.tmp" "$config_file"
-}
-
 merge_claude_mcp() {
     local target="$HOME/.claude.json"
 
@@ -104,7 +67,6 @@ install_codex_mcp() {
     render_codex_mcp_sections >> "$CODEX_CONFIG_FILE.tmp"
     mv "$CODEX_CONFIG_FILE.tmp" "$CODEX_CONFIG_FILE"
 
-    patch_codex_playwright_timeout
     echo "merged mcps.json -> ~/.codex/config.toml"
 }
 
@@ -133,7 +95,7 @@ merge_opencode_mcp() {
     ' "$MCP_FILE")"
 
     if [ -f "$target" ] && jq empty "$target" >/dev/null 2>&1; then
-        jq --argjson mcp "$opencode_mcp" '.mcp = ((.mcp // {}) + $mcp)' "$target" > "$target.tmp" \
+        jq --argjson mcp "$opencode_mcp" '.mcp = $mcp' "$target" > "$target.tmp" \
             && mv "$target.tmp" "$target"
     else
         if [ -f "$target" ]; then
