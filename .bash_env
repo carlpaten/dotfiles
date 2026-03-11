@@ -1,0 +1,11 @@
+# Shared environment for login and non-interactive Bash shells.
+export BASH_ENV="$HOME/.bash_env"
+
+for f in \
+    "$HOME/.shell.d/10-shell.sh" \
+    "$HOME/.shell.d/50-brew.sh" \
+    "$HOME/.shell.d/50-fnm.sh" \
+    "$HOME/.shell.d/50-pnpm.sh"; do
+    [ -r "$f" ] && . "$f"
+done
+unset f

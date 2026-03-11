@@ -44,6 +44,8 @@ link() {
 
 link .bashrc
 link .zprofile
+link .bash_env
+link .bash_profile
 link .zshrc
 link .shell.d
 link .tmux.conf

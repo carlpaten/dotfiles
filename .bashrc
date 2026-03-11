@@ -1,4 +1,6 @@
-# ~/.bashrc: executed by bash(1) for non-login shells.
+# ~/.bashrc: executed by bash(1) for interactive non-login shells.
+
+[ -r "$HOME/.bash_env" ] && . "$HOME/.bash_env"
 
 # If not running interactively, don't do anything
 case $- in
@@ -6,8 +8,8 @@ case $- in
       *) return;;
 esac
 
-# Source portable (.sh) and bash-specific (.bash) modules
-for f in ~/.shell.d/*.sh ~/.shell.d/*.bash; do
+# Source bash-specific modules
+for f in ~/.shell.d/*.bash; do
     [ -r "$f" ] && . "$f"
 done
 unset f
