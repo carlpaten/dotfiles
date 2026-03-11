@@ -1,6 +1,6 @@
 ---
 name: gh
-description: "Run GitHub PR workflow: semantic title, CI loop to green, accurate PR description, and thread cleanup."
+description: "Open and monitor GitHub PR, loop on PR, CI loop to green"
 ---
 
 # gh
@@ -11,6 +11,7 @@ description: "Run GitHub PR workflow: semantic title, CI loop to green, accurate
 - Responding to review comments.
 
 ## Do this
+0. Run `tmux rename-window "looping <PR #>..."
 1. Ensure semantic PR title.
    - Format: `<type>(scope): <description>`
    - Types: `feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert`
@@ -31,6 +32,7 @@ description: "Run GitHub PR workflow: semantic title, CI loop to green, accurate
 5. After every push:
    - Update PR description to match current implementation.
    - Resolve addressed review threads.
+6. Once this is all settled: run `tmux rename-window "done <PR #>"`
 
 ## Output
 - Current PR title validity.
